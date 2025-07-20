@@ -12,7 +12,7 @@ warnings.filterwarnings('ignore')
 def get_previous_business_day(date_str, years=1):
     kr_holidays = holidays.KR()
     date = datetime.strptime(date_str, "%Y%m%d")
-    one_year_ago = date - timedelta(days=365*years)
+    one_year_ago = date - timedelta(days=365 * years)
     while one_year_ago.weekday() >= 5 or one_year_ago in kr_holidays:
         one_year_ago -= timedelta(days=1)
     return one_year_ago.strftime("%Y%m%d")
@@ -28,57 +28,63 @@ def get_name_dict(market):
     return {code: stock.get_market_ticker_name(code)
             for code in stock.get_market_ticker_list(market=market)}
 
-# 가치 점수
+# 값치 점수
+
 def valueScore(fundamental):
     fundamental = fundamental[fundamental['PER'] != 0].copy()
-    fundamental['E/P'] = 1 / fundamental['PER']
-    fundamental['B/P'] = 1 / fundamental['PBR']
+    fundamental = fundamental.replace([np.inf, -np.inf], np.nan).dropna(subset=['PER', 'PBR'])
 
-    ep = fundamental['E/P']
-    bp = fundamental['B/P']
+    ep = (1 / fundamental['PER']).to_numpy()
+    bp = (1 / fundamental['PBR']).to_numpy()
 
     ep_win = winsorize_series(ep)
     bp_win = winsorize_series(bp)
 
-    ep_z = (ep_win - np.mean(ep_win)) / np.std(ep_win)
-    bp_z = (bp_win - np.mean(bp_win)) / np.std(bp_win)
+    ep_z = (ep_win - ep_win.mean()) / ep_win.std()
+    bp_z = (bp_win - bp_win.mean()) / bp_win.std()
 
-    df = pd.DataFrame({'VS': (ep_z + bp_z) / 2}, index=fundamental.index)
-    return df
+    vs = (ep_z + bp_z) / 2
+    return pd.DataFrame({'VS': vs}, index=fundamental.index)
 
 # 성장 점수
-def growScore(date, market, ohlcv_today, ohlcv_past, eps_now, eps_past):
-    # 12개월 모멘텀
+def growScore(ohlcv_today, ohlcv_past, eps_now, eps_past):
     ks = pd.merge(ohlcv_past['종가'], ohlcv_today['종가'],
                   left_index=True, right_index=True, how='inner')
     ks.columns = ['매수가', '매도가']
-    ks['Momentum'] = (ks['매도가'] - ks['매수가']) / ks['매수가'] * 100
-    ks['win_MM'] = winsorize_series(ks['Momentum'])
-    ks['stn_MM'] = (ks['win_MM'] - ks['win_MM'].mean()) / ks['win_MM'].std()
+    mmt = ((ks['매도가'] - ks['매수가']) / ks['매수가'] * 100).to_numpy()
 
-    # PEG 유사값
+    mmt_win = winsorize_series(mmt)
+    mmt_z = (mmt_win - mmt_win.mean()) / mmt_win.std()
+    mmt_series = pd.Series(mmt_z, index=ks.index)
+
     eps = pd.merge(eps_past, eps_now, left_index=True, right_index=True, how='inner')
     eps.columns = ['EPS_2', 'EPS_1']
     eps['NetChange'] = eps['EPS_1'] - eps['EPS_2']
-
     eps = pd.merge(eps, ohlcv_today['종가'], left_index=True, right_index=True, how='inner')
     eps['approxPEG'] = eps['NetChange'] / eps['종가']
     eps['approxPEG'].replace([np.inf, -np.inf], np.nan, inplace=True)
     eps = eps.dropna()
 
-    eps['win_P'] = winsorize_series(eps['approxPEG'])
-    eps.loc[eps['NetChange'] == 0, 'win_P'] = 0
-    eps['stn_P'] = (eps['win_P'] - eps['win_P'].mean()) / eps['win_P'].std()
+    peg = eps['approxPEG'].to_numpy()
+    peg_win = winsorize_series(peg)
+    peg_win[eps['NetChange'].to_numpy() == 0] = 0
+    peg_z = (peg_win - peg_win.mean()) / peg_win.std()
 
-    growth = pd.merge(ks['stn_MM'], eps['stn_P'], left_index=True, right_index=True, how='inner')
+    mmt_df = pd.DataFrame({'stn_MM': mmt_z}, index=ks.index)
+    peg_df = pd.DataFrame({'stn_P': peg_z}, index=eps.index)
+
+    growth = pd.merge(mmt_df, peg_df, left_index=True, right_index=True, how='inner')
     growth['GS'] = (growth['stn_MM'] + growth['stn_P']) / 2
+
     return growth[['GS']]
 
-# 시총
+# 시철
+
 def totalCap(cap):
     return cap[['시가총액']]
 
-# 최종 스타일 그룹 분류
+# 참조 관계 범위에서 rank 계산 값은 Pandas 유지가 더 적합
+
 def finalScore(value_S, growth_S, cap):
     style = pd.merge(value_S, growth_S, left_index=True, right_index=True, how='inner')
     style = pd.merge(style, cap, left_index=True, right_index=True, how='inner')
@@ -98,7 +104,8 @@ def finalScore(value_S, growth_S, cap):
 
     return style
 
-# 시각화
+
+
 def plot(final_style, name_dict):
     final_style = final_style.copy()
     final_style['종목명'] = final_style.index.map(lambda x: name_dict.get(x, "Unknown"))
@@ -122,15 +129,14 @@ def plot(final_style, name_dict):
     )
     fig.show()
 
-# 메인 실행 함수
-def main(date, market):
-    print(f"⏳ Fetching data for {date}, {market}...")
+# 메인
 
-    # 전처리 날짜
+def main(date, market):
+    print(f"\u23f3 Fetching data for {date}, {market}...")
+
     past1y = get_previous_business_day(date, 1)
     past3y = get_previous_business_day(date, 3)
 
-    # 공통 데이터
     fundamental_today = stock.get_market_fundamental(date, market)
     cap_today = stock.get_market_cap(date, market)
     ohlcv_today = stock.get_market_ohlcv(date, market)
@@ -140,17 +146,16 @@ def main(date, market):
         eps_now = stock.get_market_fundamental(date, market)[['EPS']]
         eps_past = stock.get_market_fundamental(past3y, market)[['EPS']]
     except:
-        print("❌ EPS 데이터 불러오기 실패")
+        print("\u274c EPS \ub370\uc774\ud130 \ubc1c\uc0dd")
         eps_now = pd.DataFrame()
         eps_past = pd.DataFrame()
 
     value_S = valueScore(fundamental_today)
-    growth_S = growScore(date, market, ohlcv_today, ohlcv_past, eps_now, eps_past)
+    growth_S = growScore(ohlcv_today, ohlcv_past, eps_now, eps_past)
     cap = totalCap(cap_today)
 
     return finalScore(value_S, growth_S, cap)
 
-# 실행
 if __name__ == "__main__":
     import time
     date = sys.argv[1]
