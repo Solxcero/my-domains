@@ -5,3 +5,5 @@ test.ipynb
 home-credit-credit-risk-model-stability/
 amex-default-prediction/
 *TOAD.ipynb
+*autoEncoder.ipynb
+fraud*.csv
